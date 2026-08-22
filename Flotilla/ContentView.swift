@@ -1,12 +1,43 @@
 import SwiftUI
+import SwiftData
 
+/// Three-column shell: worktrees (sidebar) → chats+transcript (center) →
+/// worktree-wide diff (inspector). See DESIGN.md.
 struct ContentView: View {
+    @State private var selectedWorktree: Worktree?
+    @State private var showInspector = true
+
     var body: some View {
-        Text("Flotilla")
-            .frame(minWidth: 640, minHeight: 400)
+        NavigationSplitView {
+            SidebarView(selection: $selectedWorktree)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+        } detail: {
+            if let worktree = selectedWorktree {
+                WorktreeDetailView(worktree: worktree)
+                    .inspector(isPresented: $showInspector) {
+                        DiffInspectorView(worktree: worktree)
+                            .inspectorColumnWidth(min: 280, ideal: 360)
+                    }
+            } else {
+                ContentUnavailableView("No worktree selected",
+                    systemImage: "sailboat",
+                    description: Text("Pick a worktree, or create one to start a run."))
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    showInspector.toggle()
+                } label: {
+                    Label("Diff", systemImage: "sidebar.trailing")
+                }
+                .disabled(selectedWorktree == nil)
+            }
+        }
     }
 }
 
 #Preview {
     ContentView()
+        .modelContainer(for: [Repo.self, Worktree.self, Chat.self], inMemory: true)
 }
