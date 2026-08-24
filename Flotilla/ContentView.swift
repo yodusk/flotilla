@@ -4,6 +4,7 @@ import SwiftData
 /// Three-column shell: worktrees (sidebar) → chats+transcript (center) →
 /// worktree-wide diff (inspector). See DESIGN.md.
 struct ContentView: View {
+    @Environment(\.modelContext) private var context
     @State private var selectedWorktree: Worktree?
     @State private var showInspector = true
 
@@ -34,6 +35,7 @@ struct ContentView: View {
                 .disabled(selectedWorktree == nil)
             }
         }
+        .task { await Reconciler.run(context) }
     }
 }
 

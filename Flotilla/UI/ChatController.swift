@@ -2,22 +2,41 @@ import Foundation
 import Observation
 
 /// Drives one chat's agent session and turns the normalized event stream into
-/// renderable lines. Lives in memory only — the durable transcript is the
-/// agent's own file (see DESIGN.md).
+/// renderable items. Correlates tool calls with their results, and drops
+/// protocol noise (hooks, rate limits, status) so the transcript reads as a
+/// conversation. Lives in memory only — the durable transcript is the agent's
+/// own file (see DESIGN.md).
 @MainActor
 @Observable
 final class ChatController {
-    struct Line: Identifiable, Sendable {
-        let id = UUID()
-        var role: Role
-        var text: String
-        enum Role: Sendable { case user, assistant, thinking, tool, notice, done }
+    /// One tool invocation and its eventual result, rendered as a single card.
+    struct ToolRun: Sendable {
+        var callID: String
+        var name: String
+        var kind: ToolKind
+        var summary: String
+        var status: Status
+        var output: String
+        enum Status: Sendable { case running, ok, failed }
     }
 
-    private(set) var lines: [Line] = []
+    struct Item: Identifiable {
+        let id = UUID()
+        var kind: Kind
+        enum Kind {
+            case user(String)
+            case assistant(String)
+            case thinking(String)
+            case tool(ToolRun)
+            case error(String)
+        }
+    }
+
+    private(set) var items: [Item] = []
     private(set) var isRunning = false
     private(set) var usage: TokenUsage?
 
+    private var toolIndex: [String: Int] = [:]
     private var session: OneShotSession?
     private let worktree: URL
     private let agent: AgentKind
@@ -25,32 +44,27 @@ final class ChatController {
     init(worktree: URL, agent: AgentKind, sessionID: String? = nil) {
         self.worktree = worktree
         self.agent = agent
-        if let sessionID {
-            self.session = makeSession(sessionID)
-        }
+        if let sessionID { self.session = makeSession(sessionID) }
     }
 
     func send(_ prompt: String) {
         guard !prompt.isEmpty, !isRunning else { return }
-        lines.append(Line(role: .user, text: prompt))
+        items.append(Item(kind: .user(prompt)))
         isRunning = true
 
         let session = session ?? makeSession(nil)
         self.session = session
 
         Task { [weak self] in
-            // Begin consuming events for this turn.
             let consume = Task { await self?.consume(session.events) }
             do { try await session.send(prompt) }
-            catch { self?.append(.notice, "launch failed: \(error)") }
+            catch { self?.items.append(Item(kind: .error("launch failed: \(error)"))) }
             _ = await consume.value
             self?.isRunning = false
         }
     }
 
-    func stop() {
-        Task { await session?.stop() }
-    }
+    func stop() { Task { await session?.stop() } }
 
     // MARK: - Private
 
@@ -70,39 +84,141 @@ final class ChatController {
     private func apply(_ event: TranscriptEvent) {
         switch event {
         case .userMessage(let text):
-            append(.user, text)
+            appendText(text, as: .userRole)
+
         case .assistantDelta(_, let text):
-            appendDelta(.assistant, text)
+            streamText(text, as: .assistantRole)
         case .assistantMessage(_, let text):
-            append(.assistant, text)
+            appendText(text, as: .assistantRole)
+
         case .thinkingDelta(_, let text):
-            appendDelta(.thinking, text)
+            streamText(text, as: .thinkingRole)
         case .thinkingMessage(_, let text):
-            append(.thinking, text)
+            appendText(text, as: .thinkingRole)
+
         case .toolCall(let call):
-            append(.tool, "→ \(call.name)")
+            startTool(call)
+        case .commandOutputDelta(let id, let chunk):
+            appendToolOutput(id, chunk)
         case .toolResult(let result):
-            append(.tool, "\(result.isError ? "✗" : "✓") \(result.name ?? "result")")
+            finishTool(result)
+
         case .usage(let u):
             usage = u
         case .runFinished(let outcome):
-            append(.done, outcome.isError ? "error: \(outcome.errorMessage ?? "unknown")" : "done")
+            if outcome.isError {
+                items.append(Item(kind: .error(outcome.errorMessage ?? "run failed")))
+            }
         case .notice(let n):
-            append(.notice, n.message)
-        case .sessionStarted, .turnStarted, .turnCompleted, .toolCallArgsDelta, .commandOutputDelta, .raw:
+            if n.level == .error { items.append(Item(kind: .error(n.message))) }
+            // info/warning notices (hooks, rate limits, status) are dropped.
+
+        case .sessionStarted, .turnStarted, .turnCompleted, .toolCallArgsDelta, .raw:
             break
         }
     }
 
-    private func append(_ role: Line.Role, _ text: String) {
-        lines.append(Line(role: role, text: text))
+    // MARK: - Text items
+
+    private enum Role { case userRole, assistantRole, thinkingRole }
+
+    private func appendText(_ text: String, as role: Role) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Collapse a just-streamed item into its settled form (prefix match);
+        // otherwise it's a distinct block — append it.
+        if let last = items.last, matches(last.kind, role) {
+            let existing = current(last.kind)
+            if existing.isEmpty || trimmed.hasPrefix(existing) {
+                items[items.count - 1].kind = make(role, trimmed)
+                return
+            }
+        }
+        items.append(Item(kind: make(role, trimmed)))
     }
 
-    private func appendDelta(_ role: Line.Role, _ text: String) {
-        if let last = lines.last, last.role == role {
-            lines[lines.count - 1].text += text
+    private func streamText(_ text: String, as role: Role) {
+        if let last = items.last, matches(last.kind, role), case let existing = current(last.kind) {
+            items[items.count - 1].kind = make(role, existing + text)
         } else {
-            lines.append(Line(role: role, text: text))
+            items.append(Item(kind: make(role, text)))
         }
+    }
+
+    private func matches(_ kind: Item.Kind, _ role: Role) -> Bool {
+        switch (kind, role) {
+        case (.user, .userRole), (.assistant, .assistantRole), (.thinking, .thinkingRole): true
+        default: false
+        }
+    }
+
+    private func current(_ kind: Item.Kind) -> String {
+        switch kind {
+        case .user(let t), .assistant(let t), .thinking(let t): t
+        default: ""
+        }
+    }
+
+    private func make(_ role: Role, _ text: String) -> Item.Kind {
+        switch role {
+        case .userRole: .user(text)
+        case .assistantRole: .assistant(text)
+        case .thinkingRole: .thinking(text)
+        }
+    }
+
+    // MARK: - Tool items
+
+    private func startTool(_ call: ToolCall) {
+        let run = ToolRun(callID: call.id, name: displayName(call), kind: call.kind,
+                          summary: summarize(call), status: .running, output: "")
+        toolIndex[call.id] = items.count
+        items.append(Item(kind: .tool(run)))
+    }
+
+    private func appendToolOutput(_ id: String, _ chunk: String) {
+        guard let idx = toolIndex[id], case .tool(var run) = items[idx].kind else { return }
+        run.output += chunk
+        items[idx].kind = .tool(run)
+    }
+
+    private func finishTool(_ result: ToolResult) {
+        guard let idx = toolIndex[result.callID], case .tool(var run) = items[idx].kind else {
+            return  // orphan result — drop rather than show a stray line
+        }
+        run.status = result.isError ? .failed : .ok
+        if !result.content.isEmpty { run.output = result.content }
+        items[idx].kind = .tool(run)
+    }
+
+    // MARK: - Summaries
+
+    private func displayName(_ call: ToolCall) -> String {
+        call.name
+    }
+
+    private func summarize(_ call: ToolCall) -> String {
+        switch call.kind {
+        case .shell:
+            return call.input["command"]?.stringValue ?? ""
+        case .fileEdit:
+            if let path = call.input["path"]?.stringValue { return shorten(path) }
+            if let changes = call.input.arrayValue, let first = changes.first {
+                return shorten(first["path"]?.stringValue ?? "")
+            }
+            return ""
+        case .webSearch:
+            return call.input["query"]?.stringValue ?? ""
+        case .plan:
+            let count = call.input.arrayValue?.count ?? 0
+            return count > 0 ? "\(count) steps" : ""
+        default:
+            return ""
+        }
+    }
+
+    private func shorten(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return path.replacingOccurrences(of: home, with: "~")
     }
 }

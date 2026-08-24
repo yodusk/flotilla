@@ -17,69 +17,96 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(controller.lines) { line in
-                        transcriptRow(line)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-            }
+            transcript
             Divider()
             statusBar
             promptBox
         }
     }
 
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(controller.items) { item in
+                        row(item).id(item.id)
+                    }
+                    if controller.isRunning {
+                        TypingIndicator().id("typing")
+                    }
+                }
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
+            }
+            .onChange(of: controller.items.count) {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(controller.items.last?.id, anchor: .bottom)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
-    private func transcriptRow(_ line: ChatController.Line) -> some View {
-        switch line.role {
-        case .user:
-            Text(line.text).fontWeight(.medium)
-        case .assistant:
-            Text(line.text)
-        case .thinking:
-            Text(line.text).font(.callout).foregroundStyle(.secondary).italic()
-        case .tool:
-            Text(line.text).font(.system(.callout, design: .monospaced)).foregroundStyle(.blue)
-        case .notice:
-            Text(line.text).font(.caption).foregroundStyle(.secondary)
-        case .done:
-            Text(line.text).font(.caption).foregroundStyle(.green)
+    private func row(_ item: ChatController.Item) -> some View {
+        switch item.kind {
+        case .user(let text):
+            UserBubble(text: text)
+        case .assistant(let text):
+            AssistantText(text: text)
+        case .thinking(let text):
+            ThinkingBlock(text: text)
+        case .tool(let run):
+            ToolCard(run: run)
+        case .error(let text):
+            ErrorRow(text: text)
         }
     }
 
     private var statusBar: some View {
         HStack(spacing: 12) {
-            Label(chat.agent.displayName, systemImage: "cpu")
+            Image(systemName: "cpu")
+            Text(chat.agent.displayName)
             if let u = controller.usage {
+                Text("·")
                 Text("\(u.input + u.output) tok")
+                if let cost = u.costUSD {
+                    Text(String(format: "· $%.3f", cost))
+                }
             }
             Spacer()
             if controller.isRunning {
                 ProgressView().controlSize(.small)
-                Button("Stop") { controller.stop() }
+                Button("Stop", role: .destructive) { controller.stop() }
+                    .buttonStyle(.borderless)
             }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 12).padding(.vertical, 4)
+        .padding(.horizontal, 16).padding(.vertical, 6)
     }
 
     private var promptBox: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .bottom, spacing: 10) {
             TextField("Message \(chat.agent.displayName)…", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
-                .lineLimit(1...6)
+                .lineLimit(1...8)
+                .font(.body)
                 .onSubmit(send)
             Button(action: send) {
-                Image(systemName: "arrow.up.circle.fill").font(.title2)
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.title)
+                    .symbolRenderingMode(.hierarchical)
             }
             .buttonStyle(.plain)
-            .disabled(draft.isEmpty || controller.isRunning)
+            .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty || controller.isRunning)
         }
         .padding(12)
+        .background(.regularMaterial)
+        .clipShape(.rect(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.separator))
+        .padding(16)
     }
 
     private func send() {
