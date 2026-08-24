@@ -24,4 +24,13 @@ enum AgentKind: String, Sendable, Codable, CaseIterable, Identifiable {
         case .pi: "pi"
         }
     }
+
+    /// SF Symbol used across the sidebar and tabs.
+    var symbol: String {
+        switch self {
+        case .claude: "sparkle"
+        case .codex: "chevron.left.forwardslash.chevron.right"
+        case .pi: "function"
+        }
+    }
 }

@@ -5,15 +5,10 @@ struct ChatView: View {
     let chat: Chat
     let worktree: Worktree
 
-    @State private var controller: ChatController
+    @Environment(ChatStore.self) private var store
     @State private var draft = ""
 
-    init(chat: Chat, worktree: Worktree) {
-        self.chat = chat
-        self.worktree = worktree
-        _controller = State(initialValue: ChatController(
-            worktree: worktree.url, agent: chat.agent, sessionID: chat.sessionID))
-    }
+    private var controller: ChatController { store.controller(for: chat, in: worktree) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,10 +17,7 @@ struct ChatView: View {
             statusBar
             promptBox
         }
-        .task {
-            controller.onSessionID = { chat.sessionID = $0 }
-            await controller.loadHistory()
-        }
+        .task { await controller.loadHistory() }
     }
 
     private var transcript: some View {

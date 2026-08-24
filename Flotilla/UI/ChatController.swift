@@ -37,6 +37,11 @@ final class ChatController {
     private(set) var usage: TokenUsage?
     private(set) var sessionID: String?
 
+    var lastIsError: Bool {
+        if case .error = items.last?.kind { return true }
+        return false
+    }
+
     /// Called when the agent reports its session id (new run or first resume),
     /// so the owner can persist it on the `Chat`.
     var onSessionID: ((String) -> Void)?
