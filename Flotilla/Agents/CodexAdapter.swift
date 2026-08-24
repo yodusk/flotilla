@@ -71,8 +71,12 @@ struct CodexAdapter: AgentProvider {
 
     func sessionFileURL(session: String, worktree: URL) -> URL? {
         // ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl — date-sharded,
-        // so it can't be derived from the id alone; look it up via the index.
+        // so it can't be derived from the id alone; scan instead.
         return nil
+    }
+
+    func sessionSearchRoot(worktree: URL) -> URL? {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
     }
 
     // MARK: - Items

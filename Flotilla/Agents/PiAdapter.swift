@@ -85,7 +85,7 @@ struct PiAdapter: AgentProvider {
             return [.sessionStarted(SessionInfo(id: obj["id"] as? String ?? "",
                 agent: .pi, model: nil, cwd: obj["cwd"] as? String))]
         case "message":
-            return parseAgentMessage(obj["message"] as? [String: Any])
+            return parseAgentMessage(obj["message"] as? [String: Any], includeToolCalls: true)
         default:
             return []   // model_change, compaction, label, etc. — skip
         }
@@ -95,6 +95,12 @@ struct PiAdapter: AgentProvider {
         // ~/.pi/agent/sessions/--<cwd>--/<timestamp>_<uuid>.jsonl — timestamp
         // prefix isn't derivable from the id; resolve by scanning the dir.
         return nil
+    }
+
+    func sessionSearchRoot(worktree: URL) -> URL? {
+        let encoded = worktree.path.replacingOccurrences(of: "/", with: "-")
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".pi/agent/sessions/-\(encoded)-")
     }
 
     // MARK: - Parsing
@@ -123,11 +129,14 @@ struct PiAdapter: AgentProvider {
     }
 
     private func parseMessageEnd(_ obj: [String: Any]) -> [TranscriptEvent] {
-        parseAgentMessage(obj["message"] as? [String: Any])
+        // Live: tool calls arrive via tool_execution_* events, so skip them here.
+        parseAgentMessage(obj["message"] as? [String: Any], includeToolCalls: false)
     }
 
     /// Shared shape between `message_end` events and on-disk `message` entries.
-    private func parseAgentMessage(_ message: [String: Any]?) -> [TranscriptEvent] {
+    /// On disk there are no `tool_execution_*` events, so `includeToolCalls`
+    /// must be true when parsing rollout files or tool calls go missing.
+    private func parseAgentMessage(_ message: [String: Any]?, includeToolCalls: Bool) -> [TranscriptEvent] {
         guard let message else { return [] }
         switch message["role"] as? String {
         case "user":
@@ -142,7 +151,12 @@ struct PiAdapter: AgentProvider {
                     switch block["type"] as? String {
                     case "text": events.append(.assistantMessage(blockID: nil, text: block["text"] as? String ?? ""))
                     case "thinking": events.append(.thinkingMessage(blockID: nil, text: block["thinking"] as? String ?? ""))
-                    default: break   // toolCall handled via tool_execution_* events
+                    case "toolCall" where includeToolCalls:
+                        if let id = block["id"] as? String, let name = block["name"] as? String {
+                            events.append(.toolCall(ToolCall(id: id, name: name,
+                                kind: Self.toolKind(name), input: jsonValue(block["arguments"]))))
+                        }
+                    default: break
                     }
                 }
             }

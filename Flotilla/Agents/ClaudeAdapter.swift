@@ -67,9 +67,15 @@ struct ClaudeAdapter: AgentProvider {
 
     func sessionFileURL(session: String, worktree: URL) -> URL? {
         // ~/.claude/projects/<cwd-with-slashes-as-dashes>/<session>.jsonl
+        projectDir(worktree).appendingPathComponent("\(session).jsonl")
+    }
+
+    func sessionSearchRoot(worktree: URL) -> URL? { projectDir(worktree) }
+
+    private func projectDir(_ worktree: URL) -> URL {
         let encoded = worktree.path.replacingOccurrences(of: "/", with: "-")
         return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/projects/\(encoded)/\(session).jsonl")
+            .appendingPathComponent(".claude/projects/\(encoded)")
     }
 
     // MARK: - Parsing

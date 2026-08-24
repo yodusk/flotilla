@@ -22,6 +22,10 @@ struct ChatView: View {
             statusBar
             promptBox
         }
+        .task {
+            controller.onSessionID = { chat.sessionID = $0 }
+            await controller.loadHistory()
+        }
     }
 
     private var transcript: some View {

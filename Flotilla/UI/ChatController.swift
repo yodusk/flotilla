@@ -35,16 +35,35 @@ final class ChatController {
     private(set) var items: [Item] = []
     private(set) var isRunning = false
     private(set) var usage: TokenUsage?
+    private(set) var sessionID: String?
+
+    /// Called when the agent reports its session id (new run or first resume),
+    /// so the owner can persist it on the `Chat`.
+    var onSessionID: ((String) -> Void)?
 
     private var toolIndex: [String: Int] = [:]
     private var session: OneShotSession?
+    private let provider: AgentProvider
     private let worktree: URL
     private let agent: AgentKind
 
     init(worktree: URL, agent: AgentKind, sessionID: String? = nil) {
         self.worktree = worktree
         self.agent = agent
+        self.provider = AgentRegistry.provider(for: agent)
+        self.sessionID = sessionID
         if let sessionID { self.session = makeSession(sessionID) }
+    }
+
+    /// Load prior turns from the agent's on-disk transcript. No-op if there's no
+    /// session yet or the transcript is already populated. See docs/formats.
+    func loadHistory() async {
+        guard let sessionID, items.isEmpty else { return }
+        guard let url = SessionFiles.locate(provider, session: sessionID, worktree: worktree),
+              let content = try? String(contentsOf: url, encoding: .utf8) else { return }
+        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+            for event in provider.parseRollout(line: String(line)) { apply(event) }
+        }
     }
 
     func send(_ prompt: String) {
@@ -69,7 +88,6 @@ final class ChatController {
     // MARK: - Private
 
     private func makeSession(_ id: String?) -> OneShotSession {
-        let provider = AgentRegistry.provider(for: agent)
         let config = AgentConfig(binaryPath: AgentRegistry.resolveBinary(agent.defaultBinary))
         return OneShotSession(provider: provider, worktree: worktree, config: config, sessionID: id)
     }
@@ -113,7 +131,12 @@ final class ChatController {
             if n.level == .error { items.append(Item(kind: .error(n.message))) }
             // info/warning notices (hooks, rate limits, status) are dropped.
 
-        case .sessionStarted, .turnStarted, .turnCompleted, .toolCallArgsDelta, .raw:
+        case .sessionStarted(let info):
+            if !info.id.isEmpty, info.id != sessionID {
+                sessionID = info.id
+                onSessionID?(info.id)
+            }
+        case .turnStarted, .turnCompleted, .toolCallArgsDelta, .raw:
             break
         }
     }

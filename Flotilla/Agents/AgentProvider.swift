@@ -17,8 +17,18 @@ protocol AgentProvider: Sendable {
     /// The on-disk format differs from the stream — see docs/formats/normalized.md.
     func parseRollout(line: String) -> [TranscriptEvent]
 
-    /// Where this agent persists the given session's transcript, if known.
+    /// Where this agent persists the given session's transcript, if directly
+    /// derivable from the id (e.g. Claude names the file by session id).
     func sessionFileURL(session: String, worktree: URL) -> URL?
+
+    /// Directory to scan for a session file when the name isn't derivable from
+    /// the id (Codex date-shards, pi timestamp-prefixes). `SessionFiles.locate`
+    /// scans this for a file whose name contains the session id.
+    func sessionSearchRoot(worktree: URL) -> URL?
+}
+
+extension AgentProvider {
+    func sessionSearchRoot(worktree: URL) -> URL? { nil }
 }
 
 /// A subprocess invocation. `AgentRunner` executes this; adapters only describe it.
